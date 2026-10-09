@@ -185,7 +185,7 @@ func (z *Zip) Archive(sources []string, destination string) error {
 
 // Unarchive unpacks the .zip file at source to destination.
 // Destination will be treated as a folder name.
-func (z *Zip) Unarchive(source, destination string) error {
+func (z *Zip) Unarchive(source, destination string) (err error) {
 	if !fileExists(destination) && z.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -223,8 +223,15 @@ func (z *Zip) Unarchive(source, destination string) error {
 		}
 	}
 
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
+
 	for {
-		err := z.extractNext(destination)
+		err := z.extractNext(destination, deferredDirs)
 		if err == io.EOF {
 			break
 		}
@@ -240,7 +247,7 @@ func (z *Zip) Unarchive(source, destination string) error {
 	return nil
 }
 
-func (z *Zip) extractNext(to string) error {
+func (z *Zip) extractNext(to string, deferredDirs deferredDirPerms) error {
 	f, err := z.Read()
 	if err != nil {
 		return err // don't wrap error; calling loop must break on io.EOF
@@ -267,15 +274,15 @@ func (z *Zip) extractNext(to string) error {
 			header.Name = header.Name[slash+1:]
 		}
 	}
-	return z.extractFile(f, to, &header)
+	return z.extractFile(f, to, &header, deferredDirs)
 }
 
-func (z *Zip) extractFile(f File, to string, header *zip.FileHeader) error {
+func (z *Zip) extractFile(f File, to string, header *zip.FileHeader, deferredDirs deferredDirPerms) error {
 	to = filepath.Join(to, header.Name)
 
 	// if a directory, no content; simply make the directory and return
 	if f.IsDir() {
-		return mkdir(to, f.Mode())
+		return deferredDirs.mkdir(to, f.Mode())
 	}
 
 	// do not overwrite existing files, if configured
@@ -570,7 +577,7 @@ func (z *Zip) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the zip archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (z *Zip) Extract(source, target, destination string) error {
+func (z *Zip) Extract(source, target, destination string) (err error) {
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 
@@ -578,6 +585,13 @@ func (z *Zip) Extract(source, target, destination string) error {
 	// we will continue walking and extracting files
 	// until we are no longer within that directory
 	var targetDirPath string
+
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
 
 	return z.Walk(source, func(f File) error {
 		zfh, ok := f.Header.(zip.FileHeader)
@@ -601,9 +615,9 @@ func (z *Zip) Extract(source, target, destination string) error {
 			if err != nil {
 				return fmt.Errorf("relativizing paths: %v", err)
 			}
-			joined := filepath.Join(destination, end)
+			zfh.Name = end
 
-			err = z.extractFile(f, joined, &zfh)
+			err = z.extractFile(f, destination, &zfh, deferredDirs)
 			if err != nil {
 				return fmt.Errorf("extracting file %s: %v", zfh.Name, err)
 			}

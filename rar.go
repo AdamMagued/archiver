@@ -78,7 +78,7 @@ func (*Rar) CheckPath(to, filename string) error {
 // Unarchive unpacks the .rar file at source to destination.
 // Destination will be treated as a folder name. It supports
 // multi-volume archives.
-func (r *Rar) Unarchive(source, destination string) error {
+func (r *Rar) Unarchive(source, destination string) (err error) {
 	if !fileExists(destination) && r.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -97,14 +97,21 @@ func (r *Rar) Unarchive(source, destination string) error {
 		}
 	}
 
-	err := r.OpenFile(source)
+	err = r.OpenFile(source)
 	if err != nil {
 		return fmt.Errorf("opening rar archive for reading: %v", err)
 	}
 	defer r.Close()
 
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
+
 	for {
-		err := r.unrarNext(destination)
+		err := r.unrarNext(destination, deferredDirs)
 		if err == io.EOF {
 			break
 		}
@@ -155,7 +162,7 @@ func (r *Rar) addTopLevelFolder(sourceArchive, destination string) (string, erro
 	return destination, nil
 }
 
-func (r *Rar) unrarNext(to string) error {
+func (r *Rar) unrarNext(to string, deferredDirs deferredDirPerms) error {
 	f, err := r.Read()
 	if err != nil {
 		return err // don't wrap error; calling loop must break on io.EOF
@@ -183,10 +190,10 @@ func (r *Rar) unrarNext(to string) error {
 		}
 	}
 
-	return r.unrarFile(f, filepath.Join(to, header.Name))
+	return r.unrarFile(f, filepath.Join(to, header.Name), deferredDirs)
 }
 
-func (r *Rar) unrarFile(f File, to string) error {
+func (r *Rar) unrarFile(f File, to string, deferredDirs deferredDirPerms) error {
 	// do not overwrite existing files, if configured
 	if !f.IsDir() && !r.OverwriteExisting && fileExists(to) {
 		return fmt.Errorf("file already exists: %s", to)
@@ -204,7 +211,7 @@ func (r *Rar) unrarFile(f File, to string) error {
 				return fmt.Errorf("changing dir mode: %v", err)
 			}
 		} else {
-			err := mkdir(to, hdr.Mode())
+			err := deferredDirs.mkdir(to, hdr.Mode())
 			if err != nil {
 				return fmt.Errorf("making directories: %v", err)
 			}
@@ -335,7 +342,7 @@ func (r *Rar) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the rar archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (r *Rar) Extract(source, target, destination string) error {
+func (r *Rar) Extract(source, target, destination string) (err error) {
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 
@@ -343,6 +350,13 @@ func (r *Rar) Extract(source, target, destination string) error {
 	// we will continue walking and extracting files
 	// until we are no longer within that directory
 	var targetDirPath string
+
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
 
 	return r.Walk(source, func(f File) error {
 		th, ok := f.Header.(*rardecode.FileHeader)
@@ -368,7 +382,7 @@ func (r *Rar) Extract(source, target, destination string) error {
 			}
 			joined := filepath.Join(destination, end)
 
-			err = r.unrarFile(f, joined)
+			err = r.unrarFile(f, joined, deferredDirs)
 			if err != nil {
 				return fmt.Errorf("extracting file %s: %v", th.Name, err)
 			}

@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -589,3 +590,209 @@ func (ffi fakeFileInfo) Mode() os.FileMode  { return ffi.mode }
 func (ffi fakeFileInfo) ModTime() time.Time { return ffi.modTime }
 func (ffi fakeFileInfo) IsDir() bool        { return ffi.isDir }
 func (ffi fakeFileInfo) Sys() interface{}   { return ffi.sys }
+
+func TestUnarchiveReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping directory permission test on windows")
+	}
+
+	tmp, err := ioutil.TempDir("", "archiver_ro_test")
+	if err != nil {
+		t.Fatalf("TempDir: %v", err)
+	}
+	defer func() {
+		_ = filepath.Walk(tmp, func(p string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				_ = os.Chmod(p, 0755)
+			}
+			return nil
+		})
+		_ = os.RemoveAll(tmp)
+	}()
+
+	srcDir := filepath.Join(tmp, "src")
+	roDir := filepath.Join(srcDir, "ro_folder")
+	subRoDir := filepath.Join(roDir, "sub_ro_folder")
+	if err := os.MkdirAll(subRoDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	file1 := filepath.Join(roDir, "file1.txt")
+	if err := ioutil.WriteFile(file1, []byte("file1 content"), 0644); err != nil {
+		t.Fatalf("WriteFile file1: %v", err)
+	}
+	file2 := filepath.Join(subRoDir, "file2.txt")
+	if err := ioutil.WriteFile(file2, []byte("file2 content"), 0644); err != nil {
+		t.Fatalf("WriteFile file2: %v", err)
+	}
+
+	if err := os.Chmod(subRoDir, 0555); err != nil {
+		t.Fatalf("Chmod subRoDir: %v", err)
+	}
+	if err := os.Chmod(roDir, 0555); err != nil {
+		t.Fatalf("Chmod roDir: %v", err)
+	}
+
+	formats := []struct {
+		name string
+		au   archiverUnarchiver
+	}{
+		{"tar", DefaultTar},
+		{"tar.gz", DefaultTarGz},
+		{"zip", DefaultZip},
+	}
+
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			archivePath := filepath.Join(tmp, "archive."+tc.name)
+			if err := tc.au.Archive([]string{roDir}, archivePath); err != nil {
+				t.Fatalf("Archive (%s): %v", tc.name, err)
+			}
+
+			destDir := filepath.Join(tmp, "dest_"+tc.name)
+			if err := tc.au.Unarchive(archivePath, destDir); err != nil {
+				t.Fatalf("Unarchive (%s): %v", tc.name, err)
+			}
+
+			extractedFile1 := filepath.Join(destDir, "ro_folder", "file1.txt")
+			data1, err := ioutil.ReadFile(extractedFile1)
+			if err != nil {
+				t.Fatalf("ReadFile file1: %v", err)
+			}
+			if string(data1) != "file1 content" {
+				t.Fatalf("expected 'file1 content', got '%s'", string(data1))
+			}
+
+			extractedFile2 := filepath.Join(destDir, "ro_folder", "sub_ro_folder", "file2.txt")
+			data2, err := ioutil.ReadFile(extractedFile2)
+			if err != nil {
+				t.Fatalf("ReadFile file2: %v", err)
+			}
+			if string(data2) != "file2 content" {
+				t.Fatalf("expected 'file2 content', got '%s'", string(data2))
+			}
+
+			infoRo, err := os.Stat(filepath.Join(destDir, "ro_folder"))
+			if err != nil {
+				t.Fatalf("Stat ro_folder: %v", err)
+			}
+			if infoRo.Mode().Perm() != 0555 {
+				t.Errorf("expected mode 0555 for ro_folder, got %04o", infoRo.Mode().Perm())
+			}
+
+			infoSubRo, err := os.Stat(filepath.Join(destDir, "ro_folder", "sub_ro_folder"))
+			if err != nil {
+				t.Fatalf("Stat sub_ro_folder: %v", err)
+			}
+			if infoSubRo.Mode().Perm() != 0555 {
+				t.Errorf("expected mode 0555 for sub_ro_folder, got %04o", infoSubRo.Mode().Perm())
+			}
+		})
+	}
+}
+
+func TestExtractReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping directory permission test on windows")
+	}
+
+	tmp, err := ioutil.TempDir("", "archiver_ro_extract_test")
+	if err != nil {
+		t.Fatalf("TempDir: %v", err)
+	}
+	defer func() {
+		_ = filepath.Walk(tmp, func(p string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				_ = os.Chmod(p, 0755)
+			}
+			return nil
+		})
+		_ = os.RemoveAll(tmp)
+	}()
+
+	srcDir := filepath.Join(tmp, "src")
+	roDir := filepath.Join(srcDir, "ro_folder")
+	subRoDir := filepath.Join(roDir, "sub_ro_folder")
+	if err := os.MkdirAll(subRoDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	file1 := filepath.Join(roDir, "file1.txt")
+	if err := ioutil.WriteFile(file1, []byte("file1 content"), 0644); err != nil {
+		t.Fatalf("WriteFile file1: %v", err)
+	}
+	file2 := filepath.Join(subRoDir, "file2.txt")
+	if err := ioutil.WriteFile(file2, []byte("file2 content"), 0644); err != nil {
+		t.Fatalf("WriteFile file2: %v", err)
+	}
+
+	if err := os.Chmod(subRoDir, 0555); err != nil {
+		t.Fatalf("Chmod subRoDir: %v", err)
+	}
+	if err := os.Chmod(roDir, 0555); err != nil {
+		t.Fatalf("Chmod roDir: %v", err)
+	}
+
+	formats := []struct {
+		name string
+		a    Archiver
+		e    Extractor
+	}{
+		{"tar", DefaultTar, DefaultTar},
+		{"tar.gz", DefaultTarGz, DefaultTarGz},
+		{"zip", DefaultZip, DefaultZip},
+	}
+
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			archivePath := filepath.Join(tmp, "archive."+tc.name)
+			if err := tc.a.Archive([]string{roDir}, archivePath); err != nil {
+				t.Fatalf("Archive (%s): %v", tc.name, err)
+			}
+
+			destDir := filepath.Join(tmp, "dest_extract_"+tc.name)
+			if err := os.MkdirAll(destDir, 0755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := tc.e.Extract(archivePath, "ro_folder", destDir); err != nil {
+				t.Fatalf("Extract (%s): %v", tc.name, err)
+			}
+
+			extractedFile1 := filepath.Join(destDir, "ro_folder", "file1.txt")
+			data1, err := ioutil.ReadFile(extractedFile1)
+			if err != nil {
+				t.Fatalf("ReadFile file1: %v", err)
+			}
+			if string(data1) != "file1 content" {
+				t.Fatalf("expected 'file1 content', got '%s'", string(data1))
+			}
+
+			extractedFile2 := filepath.Join(destDir, "ro_folder", "sub_ro_folder", "file2.txt")
+			data2, err := ioutil.ReadFile(extractedFile2)
+			if err != nil {
+				t.Fatalf("ReadFile file2: %v", err)
+			}
+			if string(data2) != "file2 content" {
+				t.Fatalf("expected 'file2 content', got '%s'", string(data2))
+			}
+
+			infoRo, err := os.Stat(filepath.Join(destDir, "ro_folder"))
+			if err != nil {
+				t.Fatalf("Stat ro_folder: %v", err)
+			}
+			if infoRo.Mode().Perm() != 0555 {
+				t.Errorf("expected mode 0555 for ro_folder, got %04o", infoRo.Mode().Perm())
+			}
+
+			infoSubRo, err := os.Stat(filepath.Join(destDir, "ro_folder", "sub_ro_folder"))
+			if err != nil {
+				t.Fatalf("Stat sub_ro_folder: %v", err)
+			}
+			if infoSubRo.Mode().Perm() != 0555 {
+				t.Errorf("expected mode 0555 for sub_ro_folder, got %04o", infoSubRo.Mode().Perm())
+			}
+		})
+	}
+}
+
+

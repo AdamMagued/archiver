@@ -51,6 +51,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -281,12 +282,46 @@ func fileExists(name string) bool {
 	return !os.IsNotExist(err)
 }
 
-func mkdir(dirPath string, dirMode os.FileMode) error {
-	err := os.MkdirAll(dirPath, dirMode)
+type deferredDirPerms map[string]os.FileMode
+
+func (d deferredDirPerms) mkdir(dirPath string, dirMode os.FileMode) error {
+	dirPath = filepath.Clean(dirPath)
+	createMode := dirMode
+	if dirMode&0200 == 0 || dirMode&0100 == 0 {
+		createMode = dirMode | 0700
+		if d != nil {
+			d[dirPath] = dirMode
+		}
+	}
+	err := os.MkdirAll(dirPath, createMode)
 	if err != nil {
 		return fmt.Errorf("%s: making directory: %v", dirPath, err)
 	}
 	return nil
+}
+
+func (d deferredDirPerms) restore() error {
+	if len(d) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(d))
+	for p := range d {
+		paths = append(paths, p)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return len(paths[i]) > len(paths[j])
+	})
+	for _, p := range paths {
+		if err := os.Chmod(p, d[p]); err != nil && runtime.GOOS != "windows" {
+			return fmt.Errorf("%s: restoring directory permissions: %v", p, err)
+		}
+	}
+	return nil
+}
+
+func mkdir(dirPath string, dirMode os.FileMode) error {
+	var d deferredDirPerms
+	return d.mkdir(dirPath, dirMode)
 }
 
 func writeNewFile(fpath string, in io.Reader, fm os.FileMode) error {

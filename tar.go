@@ -128,7 +128,7 @@ func (t *Tar) Archive(sources []string, destination string) error {
 
 // Unarchive unpacks the .tar file at source to destination.
 // Destination will be treated as a folder name.
-func (t *Tar) Unarchive(source, destination string) error {
+func (t *Tar) Unarchive(source, destination string) (err error) {
 	if !fileExists(destination) && t.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -159,8 +159,15 @@ func (t *Tar) Unarchive(source, destination string) error {
 	}
 	defer t.Close()
 
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
+
 	for {
-		err := t.untarNext(destination)
+		err := t.untarNext(destination, deferredDirs)
 		if err == io.EOF {
 			break
 		}
@@ -221,7 +228,7 @@ func (t *Tar) addTopLevelFolder(sourceArchive, destination string) (string, erro
 	return destination, nil
 }
 
-func (t *Tar) untarNext(destination string) error {
+func (t *Tar) untarNext(destination string, deferredDirs deferredDirPerms) error {
 	f, err := t.Read()
 	if err != nil {
 		return err // don't wrap error; calling loop must break on io.EOF
@@ -248,10 +255,10 @@ func (t *Tar) untarNext(destination string) error {
 			header.Name = header.Name[slash+1:]
 		}
 	}
-	return t.untarFile(f, destination, header)
+	return t.untarFile(f, destination, header, deferredDirs)
 }
 
-func (t *Tar) untarFile(f File, destination string, hdr *tar.Header) error {
+func (t *Tar) untarFile(f File, destination string, hdr *tar.Header, deferredDirs deferredDirPerms) error {
 	to := filepath.Join(destination, hdr.Name)
 
 	// do not overwrite existing files, if configured
@@ -261,7 +268,7 @@ func (t *Tar) untarFile(f File, destination string, hdr *tar.Header) error {
 
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return mkdir(to, f.Mode())
+		return deferredDirs.mkdir(to, f.Mode())
 	case tar.TypeReg, tar.TypeRegA, tar.TypeChar, tar.TypeBlock, tar.TypeFifo, tar.TypeGNUSparse:
 		return writeNewFile(to, f, f.Mode())
 	case tar.TypeSymlink:
@@ -517,7 +524,7 @@ func (t *Tar) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the tar archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (t *Tar) Extract(source, target, destination string) error {
+func (t *Tar) Extract(source, target, destination string) (err error) {
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 
@@ -525,6 +532,13 @@ func (t *Tar) Extract(source, target, destination string) error {
 	// we will continue walking and extracting files
 	// until we are no longer within that directory
 	var targetDirPath string
+
+	deferredDirs := make(deferredDirPerms)
+	defer func() {
+		if rerr := deferredDirs.restore(); err == nil && rerr != nil {
+			err = rerr
+		}
+	}()
 
 	return t.Walk(source, func(f File) error {
 		th, ok := f.Header.(*tar.Header)
@@ -555,7 +569,7 @@ func (t *Tar) Extract(source, target, destination string) error {
 				th.Linkname = filepath.Join(filepath.Base(filepath.Dir(th.Linkname)), filepath.Base(th.Linkname))
 			}
 
-			err = t.untarFile(f, destination, th)
+			err = t.untarFile(f, destination, th, deferredDirs)
 			if err != nil {
 				return fmt.Errorf("extracting file %s: %v", th.Name, err)
 			}
