@@ -85,6 +85,8 @@ type Zip struct {
 	zr         *zip.Reader
 	ridx       int
 	//decinitialized bool
+
+	deferredDirs deferredDirMap
 }
 
 // CheckExt ensures the file extension matches the format.
@@ -185,7 +187,16 @@ func (z *Zip) Archive(sources []string, destination string) error {
 
 // Unarchive unpacks the .zip file at source to destination.
 // Destination will be treated as a folder name.
-func (z *Zip) Unarchive(source, destination string) error {
+func (z *Zip) Unarchive(source, destination string) (err error) {
+	z.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := z.deferredDirs.restore()
+		z.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	if !fileExists(destination) && z.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -275,6 +286,9 @@ func (z *Zip) extractFile(f File, to string, header *zip.FileHeader) error {
 
 	// if a directory, no content; simply make the directory and return
 	if f.IsDir() {
+		if z.deferredDirs != nil {
+			return z.deferredDirs.mkdir(to, f.Mode())
+		}
 		return mkdir(to, f.Mode())
 	}
 
@@ -570,7 +584,16 @@ func (z *Zip) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the zip archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (z *Zip) Extract(source, target, destination string) error {
+func (z *Zip) Extract(source, target, destination string) (err error) {
+	z.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := z.deferredDirs.restore()
+		z.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 
@@ -601,9 +624,9 @@ func (z *Zip) Extract(source, target, destination string) error {
 			if err != nil {
 				return fmt.Errorf("relativizing paths: %v", err)
 			}
-			joined := filepath.Join(destination, end)
+			zfh.Name = end
 
-			err = z.extractFile(f, joined, &zfh)
+			err = z.extractFile(f, destination, &zfh)
 			if err != nil {
 				return fmt.Errorf("extracting file %s: %v", zfh.Name, err)
 			}

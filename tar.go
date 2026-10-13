@@ -55,6 +55,8 @@ type Tar struct {
 	readerWrapFn  func(io.Reader) (io.Reader, error)
 	writerWrapFn  func(io.Writer) (io.Writer, error)
 	cleanupWrapFn func()
+
+	deferredDirs deferredDirMap
 }
 
 // CheckExt ensures the file extension matches the format.
@@ -128,7 +130,16 @@ func (t *Tar) Archive(sources []string, destination string) error {
 
 // Unarchive unpacks the .tar file at source to destination.
 // Destination will be treated as a folder name.
-func (t *Tar) Unarchive(source, destination string) error {
+func (t *Tar) Unarchive(source, destination string) (err error) {
+	t.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := t.deferredDirs.restore()
+		t.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	if !fileExists(destination) && t.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -261,6 +272,9 @@ func (t *Tar) untarFile(f File, destination string, hdr *tar.Header) error {
 
 	switch hdr.Typeflag {
 	case tar.TypeDir:
+		if t.deferredDirs != nil {
+			return t.deferredDirs.mkdir(to, f.Mode())
+		}
 		return mkdir(to, f.Mode())
 	case tar.TypeReg, tar.TypeRegA, tar.TypeChar, tar.TypeBlock, tar.TypeFifo, tar.TypeGNUSparse:
 		return writeNewFile(to, f, f.Mode())
@@ -517,7 +531,16 @@ func (t *Tar) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the tar archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (t *Tar) Extract(source, target, destination string) error {
+func (t *Tar) Extract(source, target, destination string) (err error) {
+	t.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := t.deferredDirs.restore()
+		t.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 

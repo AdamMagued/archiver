@@ -301,6 +301,230 @@ func TestArchiveUnarchiveWithFolderPermissions(t *testing.T) {
 	TestArchiveUnarchive(t)
 }
 
+func TestUnarchiveReadOnlyFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping read-only folder permission test on Windows")
+	}
+
+	formats := []struct {
+		name    string
+		arch    Archiver
+		unarch  Unarchiver
+		ext     string
+	}{
+		{"tar", NewTar(), NewTar(), ".tar"},
+		{"targz", NewTarGz(), NewTarGz(), ".tar.gz"},
+		{"zip", NewZip(), NewZip(), ".zip"},
+	}
+
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp, err := ioutil.TempDir("", "archiver_ro_test_"+tc.name)
+			if err != nil {
+				t.Fatalf("TempDir: %v", err)
+			}
+			defer func() {
+				_ = filepath.Walk(tmp, func(path string, info os.FileInfo, err error) error {
+					if err == nil && info.IsDir() {
+						_ = os.Chmod(path, 0777)
+					}
+					return nil
+				})
+				_ = os.RemoveAll(tmp)
+			}()
+
+			src := filepath.Join(tmp, "src")
+			roDir := filepath.Join(src, "writeprotectedfolder")
+			nestedDir := filepath.Join(roDir, "nested")
+			if err := os.MkdirAll(nestedDir, 0755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+
+			file1 := filepath.Join(roDir, "file1.txt")
+			file2 := filepath.Join(roDir, "file2.txt")
+			nestedFile := filepath.Join(nestedDir, "nested.txt")
+			if err := ioutil.WriteFile(file1, []byte("file1 content"), 0644); err != nil {
+				t.Fatalf("WriteFile file1: %v", err)
+			}
+			if err := ioutil.WriteFile(file2, []byte("file2 content"), 0644); err != nil {
+				t.Fatalf("WriteFile file2: %v", err)
+			}
+			if err := ioutil.WriteFile(nestedFile, []byte("nested content"), 0644); err != nil {
+				t.Fatalf("WriteFile nested: %v", err)
+			}
+
+			// Change folder permissions to read-only (0555)
+			if err := os.Chmod(nestedDir, 0555); err != nil {
+				t.Fatalf("Chmod nested: %v", err)
+			}
+			if err := os.Chmod(roDir, 0555); err != nil {
+				t.Fatalf("Chmod roDir: %v", err)
+			}
+
+			archiveFile := filepath.Join(tmp, "archive"+tc.ext)
+			if err := tc.arch.Archive([]string{src}, archiveFile); err != nil {
+				t.Fatalf("Archive: %v", err)
+			}
+
+			dest := filepath.Join(tmp, "dest")
+			if err := tc.unarch.Unarchive(archiveFile, dest); err != nil {
+				t.Fatalf("Unarchive: %v", err)
+			}
+
+			destFile1 := filepath.Join(dest, "src", "writeprotectedfolder", "file1.txt")
+			destFile2 := filepath.Join(dest, "src", "writeprotectedfolder", "file2.txt")
+			destNestedFile := filepath.Join(dest, "src", "writeprotectedfolder", "nested", "nested.txt")
+
+			b1, err := ioutil.ReadFile(destFile1)
+			if err != nil {
+				t.Fatalf("reading destFile1: %v", err)
+			}
+			if string(b1) != "file1 content" {
+				t.Errorf("destFile1 content mismatch: got %q, want %q", string(b1), "file1 content")
+			}
+
+			b2, err := ioutil.ReadFile(destFile2)
+			if err != nil {
+				t.Fatalf("reading destFile2: %v", err)
+			}
+			if string(b2) != "file2 content" {
+				t.Errorf("destFile2 content mismatch: got %q, want %q", string(b2), "file2 content")
+			}
+
+			bn, err := ioutil.ReadFile(destNestedFile)
+			if err != nil {
+				t.Fatalf("reading destNestedFile: %v", err)
+			}
+			if string(bn) != "nested content" {
+				t.Errorf("destNestedFile content mismatch: got %q, want %q", string(bn), "nested content")
+			}
+
+			destRoDir := filepath.Join(dest, "src", "writeprotectedfolder")
+			destNestedDir := filepath.Join(dest, "src", "writeprotectedfolder", "nested")
+
+			info1, err := os.Stat(destRoDir)
+			if err != nil {
+				t.Fatalf("Stat destRoDir: %v", err)
+			}
+			if info1.Mode().Perm() != 0555 {
+				t.Errorf("destRoDir perm mismatch: got %v, want %v", info1.Mode().Perm(), os.FileMode(0555))
+			}
+
+			info2, err := os.Stat(destNestedDir)
+			if err != nil {
+				t.Fatalf("Stat destNestedDir: %v", err)
+			}
+			if info2.Mode().Perm() != 0555 {
+				t.Errorf("destNestedDir perm mismatch: got %v, want %v", info2.Mode().Perm(), os.FileMode(0555))
+			}
+		})
+	}
+}
+
+func TestExtractReadOnlyFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping read-only folder permission test on Windows")
+	}
+
+	formats := []struct {
+		name    string
+		arch    Archiver
+		ext     Extractor
+		extName string
+	}{
+		{"tar", NewTar(), NewTar(), ".tar"},
+		{"targz", NewTarGz(), NewTarGz(), ".tar.gz"},
+		{"zip", NewZip(), NewZip(), ".zip"},
+	}
+
+	for _, tc := range formats {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp, err := ioutil.TempDir("", "archiver_extract_ro_"+tc.name)
+			if err != nil {
+				t.Fatalf("TempDir: %v", err)
+			}
+			defer func() {
+				_ = filepath.Walk(tmp, func(path string, info os.FileInfo, err error) error {
+					if err == nil && info.IsDir() {
+						_ = os.Chmod(path, 0777)
+					}
+					return nil
+				})
+				_ = os.RemoveAll(tmp)
+			}()
+
+			src := filepath.Join(tmp, "src")
+			roDir := filepath.Join(src, "writeprotectedfolder")
+			nestedDir := filepath.Join(roDir, "nested")
+			if err := os.MkdirAll(nestedDir, 0755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+
+			file1 := filepath.Join(roDir, "file1.txt")
+			nestedFile := filepath.Join(nestedDir, "nested.txt")
+			if err := ioutil.WriteFile(file1, []byte("file1 content"), 0644); err != nil {
+				t.Fatalf("WriteFile file1: %v", err)
+			}
+			if err := ioutil.WriteFile(nestedFile, []byte("nested content"), 0644); err != nil {
+				t.Fatalf("WriteFile nested: %v", err)
+			}
+
+			if err := os.Chmod(nestedDir, 0555); err != nil {
+				t.Fatalf("Chmod nested: %v", err)
+			}
+			if err := os.Chmod(roDir, 0555); err != nil {
+				t.Fatalf("Chmod roDir: %v", err)
+			}
+
+			archiveFile := filepath.Join(tmp, "archive"+tc.extName)
+			if err := tc.arch.Archive([]string{src}, archiveFile); err != nil {
+				t.Fatalf("Archive: %v", err)
+			}
+
+			dest := filepath.Join(tmp, "dest")
+			target := "src/writeprotectedfolder"
+			if err := tc.ext.Extract(archiveFile, target, dest); err != nil {
+				t.Fatalf("Extract: %v", err)
+			}
+
+			destFile1 := filepath.Join(dest, "file1.txt")
+			destNestedFile := filepath.Join(dest, "nested", "nested.txt")
+
+			b1, err := ioutil.ReadFile(destFile1)
+			if err != nil {
+				t.Fatalf("reading destFile1: %v", err)
+			}
+			if string(b1) != "file1 content" {
+				t.Errorf("destFile1 content mismatch: got %q, want %q", string(b1), "file1 content")
+			}
+
+			bn, err := ioutil.ReadFile(destNestedFile)
+			if err != nil {
+				t.Fatalf("reading destNestedFile: %v", err)
+			}
+			if string(bn) != "nested content" {
+				t.Errorf("destNestedFile content mismatch: got %q, want %q", string(bn), "nested content")
+			}
+
+			info1, err := os.Stat(dest)
+			if err != nil {
+				t.Fatalf("Stat dest: %v", err)
+			}
+			if info1.Mode().Perm() != 0555 {
+				t.Errorf("dest perm mismatch: got %v, want %v", info1.Mode().Perm(), os.FileMode(0555))
+			}
+
+			info2, err := os.Stat(filepath.Join(dest, "nested"))
+			if err != nil {
+				t.Fatalf("Stat dest/nested: %v", err)
+			}
+			if info2.Mode().Perm() != 0555 {
+				t.Errorf("dest/nested perm mismatch: got %v, want %v", info2.Mode().Perm(), os.FileMode(0555))
+			}
+		})
+	}
+}
+
 func testArchiveUnarchive(t *testing.T, au archiverUnarchiver) {
 	auStr := fmt.Sprintf("%s", au)
 

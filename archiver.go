@@ -51,6 +51,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -287,6 +288,49 @@ func mkdir(dirPath string, dirMode os.FileMode) error {
 		return fmt.Errorf("%s: making directory: %v", dirPath, err)
 	}
 	return nil
+}
+
+// deferredDirMap tracks directories whose permissions must be applied after
+// writing directory contents (e.g. read-only directories).
+type deferredDirMap map[string]os.FileMode
+
+func (d deferredDirMap) mkdir(dirPath string, dirMode os.FileMode) error {
+	if dirMode&0200 == 0 {
+		// If directory does not have owner write permission, defer setting original permissions
+		// and create it with owner write and execute permission so directory contents can be written.
+		d[dirPath] = dirMode
+		err := os.MkdirAll(dirPath, dirMode|0700)
+		if err != nil {
+			return fmt.Errorf("%s: making directory: %v", dirPath, err)
+		}
+		_ = os.Chmod(dirPath, dirMode|0700)
+		return nil
+	}
+	return mkdir(dirPath, dirMode)
+}
+
+func (d deferredDirMap) restore() error {
+	if len(d) == 0 {
+		return nil
+	}
+	// Sort paths by length descending so child directories are restored before parent directories
+	paths := make([]string, 0, len(d))
+	for p := range d {
+		paths = append(paths, p)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		return len(paths[i]) > len(paths[j])
+	})
+	var firstErr error
+	for _, p := range paths {
+		err := os.Chmod(p, d[p])
+		if err != nil && runtime.GOOS != "windows" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: restoring directory mode: %v", p, err)
+			}
+		}
+	}
+	return firstErr
 }
 
 func writeNewFile(fpath string, in io.Reader, fm os.FileMode) error {
