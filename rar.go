@@ -54,6 +54,8 @@ type Rar struct {
 
 	rr *rardecode.Reader     // underlying stream reader
 	rc *rardecode.ReadCloser // supports multi-volume archives (files only)
+
+	deferredDirs deferredDirMap
 }
 
 // CheckExt ensures the file extension matches the format.
@@ -78,7 +80,16 @@ func (*Rar) CheckPath(to, filename string) error {
 // Unarchive unpacks the .rar file at source to destination.
 // Destination will be treated as a folder name. It supports
 // multi-volume archives.
-func (r *Rar) Unarchive(source, destination string) error {
+func (r *Rar) Unarchive(source, destination string) (err error) {
+	r.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := r.deferredDirs.restore()
+		r.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	if !fileExists(destination) && r.MkdirAll {
 		err := mkdir(destination, 0755)
 		if err != nil {
@@ -198,6 +209,9 @@ func (r *Rar) unrarFile(f File, to string) error {
 	}
 
 	if f.IsDir() {
+		if r.deferredDirs != nil {
+			return r.deferredDirs.mkdir(to, hdr.Mode())
+		}
 		if fileExists("testdata") {
 			err := os.Chmod(to, hdr.Mode())
 			if err != nil {
@@ -335,7 +349,16 @@ func (r *Rar) Walk(archive string, walkFn WalkFunc) error {
 // Extract extracts a single file from the rar archive.
 // If the target is a directory, the entire folder will
 // be extracted into destination.
-func (r *Rar) Extract(source, target, destination string) error {
+func (r *Rar) Extract(source, target, destination string) (err error) {
+	r.deferredDirs = make(deferredDirMap)
+	defer func() {
+		restoreErr := r.deferredDirs.restore()
+		r.deferredDirs = nil
+		if err == nil && restoreErr != nil {
+			err = restoreErr
+		}
+	}()
+
 	// target refers to a path inside the archive, which should be clean also
 	target = path.Clean(target)
 
